@@ -145,7 +145,7 @@ require (
 	github.com/bombsimon/wsl/v4 v4.4.1 // indirect
 	github.com/breml/bidichk v0.2.7 // indirect
 	github.com/breml/errchkjson v0.3.6 // indirect
-	github.com/buildkite/agent/v3 v3.81.0 // indirect
+	github.com/buildkite/agent/v3 v3.107.2 // indirect
 	github.com/buildkite/go-pipeline v0.13.1 // indirect
 	github.com/buildkite/interpolate v0.1.3 // indirect
 	github.com/buildkite/roko v1.2.0 // indirect
