@@ -988,7 +988,7 @@ github.com/google/go-querystring/query
 ## explicit; go 1.12
 github.com/google/gofuzz
 github.com/google/gofuzz/bytesource
-# github.com/google/licenseclassifier v0.0.0-20210722185704-3043a050f148
+# github.com/google/licenseclassifier v0.0.0-20251009224754-40da12efdc3d
 ## explicit; go 1.16
 github.com/google/licenseclassifier
 github.com/google/licenseclassifier/internal/sets
