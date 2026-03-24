@@ -19,22 +19,24 @@ import (
 	"fmt"
 
 	intoto "github.com/in-toto/attestation/go/v1"
+	"github.com/tektoncd/chains/pkg/chains/annotations"
 	"github.com/tektoncd/chains/pkg/chains/objects"
 	"github.com/tektoncd/chains/pkg/chains/signing"
 	"github.com/tektoncd/chains/pkg/chains/storage/api"
 	"github.com/tektoncd/chains/pkg/config"
 	"knative.dev/pkg/logging"
 
-	"github.com/tektoncd/chains/pkg/patch"
 	"github.com/tektoncd/pipeline/pkg/client/clientset/versioned"
 )
 
+//nolint:revive,exported
 const (
+	// StorageBackendTekton is the identifier for the Tekton storage backend
 	StorageBackendTekton      = "tekton"
-	PayloadAnnotationFormat   = "chains.tekton.dev/payload-%s"
-	SignatureAnnotationFormat = "chains.tekton.dev/signature-%s"
-	CertAnnotationsFormat     = "chains.tekton.dev/cert-%s"
-	ChainAnnotationFormat     = "chains.tekton.dev/chain-%s"
+	PayloadAnnotationFormat   = annotations.ChainsAnnotationPrefix + "payload-%s"
+	SignatureAnnotationFormat = annotations.ChainsAnnotationPrefix + "signature-%s"
+	CertAnnotationsFormat     = annotations.ChainsAnnotationPrefix + "cert-%s"
+	ChainAnnotationFormat     = annotations.ChainsAnnotationPrefix + "chain-%s"
 )
 
 // Backend is a storage backend that stores signed payloads in the TaskRun metadata as an annotation.
@@ -110,7 +112,7 @@ func (b *Backend) retrieveAnnotationValue(ctx context.Context, obj objects.Tekto
 	return annotationValue, nil
 }
 
-// RetrieveSignature retrieve the signature stored in the taskrun.
+// RetrieveSignatures retrieve the signature stored in the taskrun.
 func (b *Backend) RetrieveSignatures(ctx context.Context, obj objects.TektonObject, opts config.StorageOpts) (map[string][]string, error) {
 	logger := logging.FromContext(ctx)
 	logger.Infof("Retrieving signature on %s/%s/%s", obj.GetGVK(), obj.GetNamespace(), obj.GetName())
@@ -124,7 +126,7 @@ func (b *Backend) RetrieveSignatures(ctx context.Context, obj objects.TektonObje
 	return m, nil
 }
 
-// RetrievePayload retrieve the payload stored in the taskrun.
+// RetrievePayloads retrieve the payload stored in the taskrun.
 func (b *Backend) RetrievePayloads(ctx context.Context, obj objects.TektonObject, opts config.StorageOpts) (map[string]string, error) {
 	logger := logging.FromContext(ctx)
 	logger.Infof("Retrieving payload on %s/%s/%s", obj.GetGVK(), obj.GetNamespace(), obj.GetName())
@@ -163,25 +165,21 @@ func (s *Storer) Store(ctx context.Context, req *api.StoreRequest[objects.Tekton
 	obj := req.Object
 	logger.Infof("Storing payload on %s/%s/%s", obj.GetGVK(), obj.GetNamespace(), obj.GetName())
 
-	// Use patch instead of update to prevent race conditions.
 	key := s.key
 	if key == "" {
 		key = string(obj.GetUID())
 	}
-	patchBytes, err := patch.GetAnnotationsPatch(map[string]string{
-		// Base64 encode both the signature and the payload
+
+	storedAnnotations := map[string]string{
 		fmt.Sprintf(PayloadAnnotationFormat, key):   base64.StdEncoding.EncodeToString(req.Bundle.Content),
 		fmt.Sprintf(SignatureAnnotationFormat, key): base64.StdEncoding.EncodeToString(req.Bundle.Signature),
 		fmt.Sprintf(CertAnnotationsFormat, key):     base64.StdEncoding.EncodeToString(req.Bundle.Cert),
 		fmt.Sprintf(ChainAnnotationFormat, key):     base64.StdEncoding.EncodeToString(req.Bundle.Chain),
-	})
-	if err != nil {
+	}
+
+	if err := annotations.AddAnnotations(ctx, obj, s.client, storedAnnotations); err != nil {
 		return nil, err
 	}
 
-	patchErr := obj.Patch(ctx, s.client, patchBytes)
-	if patchErr != nil {
-		return nil, patchErr
-	}
 	return &api.StoreResponse{}, nil
 }

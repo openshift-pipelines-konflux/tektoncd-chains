@@ -25,16 +25,16 @@ Supply Chain Security in Tekton Pipelines
 Tekton Chains is a Kubernetes Custom Resource Definition (CRD) controller that
 allows you to manage your supply chain security in Tekton.
 
-In its default mode of operation, Chains works by observing all `TaskRuns`
-executions in your cluster. When `TaskRuns` complete, Chains takes a snapshot of
+In its default mode of operation, Chains works by observing all `TaskRuns` and `PipelineRuns`
+executions in your cluster. When they complete, Chains takes a snapshot of
 them. Chains then converts this snapshot to one or more standard payload
 formats, signs them and stores them somewhere.
 
 Current features include:
 
-- Signing `TaskRun` results with user provided cryptographic keys, including
-  `TaskRun`s themselves and OCI Images
-- Attestation formats like [intoto](docs/intoto.md)
+- Signing `TaskRun` and `PipelineRun` results with user provided cryptographic keys,
+  including the `TaskRun` or `PipelineRun` themselves and OCI Images
+- Attestation formats like [slsa/v1](docs/slsa-provenance.md#how-to-configure-tekton-chains)
 - Signing with a variety of cryptographic key types and services (x509, KMS)
 - Support for multiple storage backends for signatures
 
@@ -47,13 +47,13 @@ installed on your cluster before you install Chains.
 To install the latest version of Chains to your Kubernetes cluster, run:
 
 ```shell
-kubectl apply --filename https://storage.googleapis.com/tekton-releases/chains/latest/release.yaml
+kubectl apply --filename https://infra.tekton.dev/tekton-releases/chains/latest/release.yaml
 ```
 
 To install a specific version of Chains, run:
 
 ```shell
-kubectl apply -f https://storage.googleapis.com/tekton-releases/chains/previous/${VERSION}/release.yaml
+kubectl apply -f https://infra.tekton.dev/tekton-releases/chains/previous/${VERSION}/release.yaml
 ```
 
 To verify that installation was successful, wait until all Pods have Status
@@ -119,4 +119,4 @@ To learn more about Chains:
 - Attend the Chains Working Group meeting, details
   [here](https://github.com/tektoncd/community/blob/main/working-groups.md#chains)
 
-[cosign]: (https://github.com/sigstore/cosign)
+[cosign]: https://github.com/sigstore/cosign

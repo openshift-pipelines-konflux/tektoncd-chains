@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -31,24 +30,23 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/auth"
 	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/internal/optional"
-	"cloud.google.com/go/internal/trace"
+	"github.com/google/uuid"
 	"github.com/googleapis/gax-go/v2/callctx"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/api/option/internaloption"
 	raw "google.golang.org/api/storage/v1"
-	"google.golang.org/api/transport"
 	htransport "google.golang.org/api/transport/http"
 )
 
 // httpStorageClient is the HTTP-JSON API implementation of the transport-agnostic
 // storageClient interface.
 type httpStorageClient struct {
-	creds                      *google.Credentials
+	creds                      *auth.Credentials
 	hc                         *http.Client
 	xmlHost                    string
 	raw                        *raw.Service
@@ -65,7 +63,7 @@ func newHTTPStorageClient(ctx context.Context, opts ...storageOption) (storageCl
 	o := s.clientOption
 	config := newStorageConfig(o...)
 
-	var creds *google.Credentials
+	var creds *auth.Credentials
 	// In general, it is recommended to use raw.NewService instead of htransport.NewClient
 	// since raw.NewService configures the correct default endpoints when initializing the
 	// internal http client. However, in our case, "NewRangeReader" in reader.go needs to
@@ -83,10 +81,10 @@ func newHTTPStorageClient(ctx context.Context, opts ...storageOption) (storageCl
 		)
 		// Don't error out here. The user may have passed in their own HTTP
 		// client which does not auth with ADC or other common conventions.
-		c, err := transport.Creds(ctx, o...)
+		c, err := internaloption.AuthCreds(ctx, o)
 		if err == nil {
 			creds = c
-			o = append(o, internaloption.WithCredentials(creds))
+			o = append(o, option.WithAuthCredentials(creds))
 		}
 	} else {
 		var hostURL *url.URL
@@ -226,6 +224,7 @@ func (c *httpStorageClient) ListBuckets(ctx context.Context, project string, opt
 		req.Projection("full")
 		req.Prefix(it.Prefix)
 		req.PageToken(pageToken)
+		req.ReturnPartialSuccess(it.ReturnPartialSuccess)
 		if pageSize > 0 {
 			req.MaxResults(int64(pageSize))
 		}
@@ -244,6 +243,7 @@ func (c *httpStorageClient) ListBuckets(ctx context.Context, project string, opt
 			}
 			it.buckets = append(it.buckets, b)
 		}
+		it.unreachable = resp.Unreachable
 		return resp.NextPageToken, nil
 	}
 
@@ -287,12 +287,8 @@ func (c *httpStorageClient) GetBucket(ctx context.Context, bucket string, conds 
 		return err
 	}, s.retry, s.idempotent)
 
-	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-		return nil, ErrBucketNotExist
-	}
 	if err != nil {
-		return nil, err
+		return nil, formatBucketError(err)
 	}
 	return newBucket(resp)
 }
@@ -348,6 +344,10 @@ func (c *httpStorageClient) ListObjects(ctx context.Context, bucket string, q *Q
 		it.query = *q
 	}
 	fetch := func(pageSize int, pageToken string) (string, error) {
+		var err error
+		// Add trace span around List API call within the fetch.
+		ctx, _ = startSpan(ctx, "httpStorageClient.ObjectsListCall")
+		defer func() { endSpan(ctx, err) }()
 		req := c.raw.Objects.List(bucket)
 		if it.query.SoftDeleted {
 			req.SoftDeleted(it.query.SoftDeleted)
@@ -365,6 +365,12 @@ func (c *httpStorageClient) ListObjects(ctx context.Context, bucket string, q *Q
 		req.IncludeTrailingDelimiter(it.query.IncludeTrailingDelimiter)
 		req.MatchGlob(it.query.MatchGlob)
 		req.IncludeFoldersAsPrefixes(it.query.IncludeFoldersAsPrefixes)
+
+		// Cannot pass empty filter
+		if it.query.Filter != "" {
+			req.Filter(it.query.Filter)
+		}
+
 		if selection := it.query.toFieldSelection(); selection != "" {
 			req.Fields("nextPageToken", googleapi.Field(selection))
 		}
@@ -376,17 +382,12 @@ func (c *httpStorageClient) ListObjects(ctx context.Context, bucket string, q *Q
 			req.MaxResults(int64(pageSize))
 		}
 		var resp *raw.Objects
-		var err error
 		err = run(it.ctx, func(ctx context.Context) error {
 			resp, err = req.Context(ctx).Do()
 			return err
 		}, s.retry, s.idempotent)
 		if err != nil {
-			var e *googleapi.Error
-			if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-				err = ErrBucketNotExist
-			}
-			return "", err
+			return "", formatBucketError(err)
 		}
 		for _, item := range resp.Items {
 			it.items = append(it.items, newObject(item))
@@ -416,11 +417,7 @@ func (c *httpStorageClient) DeleteObject(ctx context.Context, bucket, object str
 		req.UserProject(s.userProject)
 	}
 	err := run(ctx, func(ctx context.Context) error { return req.Context(ctx).Do() }, s.retry, s.idempotent)
-	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-		return ErrObjectNotExist
-	}
-	return err
+	return formatObjectErr(err)
 }
 
 func (c *httpStorageClient) GetObject(ctx context.Context, params *getObjectParams, opts ...storageOption) (*ObjectAttrs, error) {
@@ -445,12 +442,8 @@ func (c *httpStorageClient) GetObject(ctx context.Context, params *getObjectPara
 		obj, err = req.Context(ctx).Do()
 		return err
 	}, s.retry, s.idempotent)
-	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-		return nil, ErrObjectNotExist
-	}
 	if err != nil {
-		return nil, err
+		return nil, formatObjectErr(err)
 	}
 	return newObject(obj), nil
 }
@@ -531,6 +524,19 @@ func (c *httpStorageClient) UpdateObject(ctx context.Context, params *updateObje
 			forceSendFields = append(forceSendFields, "Retention")
 		}
 	}
+
+	if uattrs.Contexts != nil && uattrs.Contexts.Custom != nil {
+		if len(uattrs.Contexts.Custom) == 0 {
+			// To delete all contexts, "Contexts" must be added to nullFields.
+			// Sending empty Custom map in the request body is a no-op without this.
+			nullFields = append(nullFields, "Contexts")
+		} else {
+			attrs.Contexts = uattrs.Contexts
+			// This is to ensure any new values or deletions are updated
+			forceSendFields = append(forceSendFields, "Contexts")
+		}
+	}
+
 	rawObj := attrs.toRawObject(params.bucket)
 	rawObj.ForceSendFields = forceSendFields
 	rawObj.NullFields = nullFields
@@ -555,12 +561,8 @@ func (c *httpStorageClient) UpdateObject(ctx context.Context, params *updateObje
 	var obj *raw.Object
 	var err error
 	err = run(ctx, func(ctx context.Context) error { obj, err = call.Context(ctx).Do(); return err }, s.retry, s.idempotent)
-	var e *googleapi.Error
-	if errors.As(err, &e) && e.Code == http.StatusNotFound {
-		return nil, ErrObjectNotExist
-	}
 	if err != nil {
-		return nil, err
+		return nil, formatObjectErr(err)
 	}
 	return newObject(obj), nil
 }
@@ -585,9 +587,8 @@ func (c *httpStorageClient) RestoreObject(ctx context.Context, params *restoreOb
 	var obj *raw.Object
 	var err error
 	err = run(ctx, func(ctx context.Context) error { obj, err = req.Context(ctx).Do(); return err }, s.retry, s.idempotent)
-	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-		return nil, ErrObjectNotExist
+	if err != nil {
+		return nil, formatObjectErr(err)
 	}
 	return newObject(obj), err
 }
@@ -610,9 +611,8 @@ func (c *httpStorageClient) MoveObject(ctx context.Context, params *moveObjectPa
 	var obj *raw.Object
 	var err error
 	err = run(ctx, func(ctx context.Context) error { obj, err = req.Context(ctx).Do(); return err }, s.retry, s.idempotent)
-	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok && e.Code == http.StatusNotFound {
-		return nil, ErrObjectNotExist
+	if err != nil {
+		return nil, formatObjectErr(err)
 	}
 	return newObject(obj), err
 }
@@ -800,7 +800,7 @@ func (c *httpStorageClient) ComposeObject(ctx context.Context, req *composeObjec
 	retryCall := func(ctx context.Context) error { obj, err = call.Context(ctx).Do(); return err }
 
 	if err := run(ctx, retryCall, s.retry, s.idempotent); err != nil {
-		return nil, err
+		return nil, formatObjectErr(err)
 	}
 	return newObject(obj), nil
 }
@@ -847,7 +847,7 @@ func (c *httpStorageClient) RewriteObject(ctx context.Context, req *rewriteObjec
 	retryCall := func(ctx context.Context) error { res, err = call.Context(ctx).Do(); return err }
 
 	if err := run(ctx, retryCall, s.retry, s.idempotent); err != nil {
-		return nil, err
+		return nil, formatObjectErr(err)
 	}
 
 	r := &rewriteObjectResponse{
@@ -867,8 +867,8 @@ func (c *httpStorageClient) NewMultiRangeDownloader(ctx context.Context, params 
 }
 
 func (c *httpStorageClient) NewRangeReader(ctx context.Context, params *newRangeReaderParams, opts ...storageOption) (r *Reader, err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/storage.httpStorageClient.NewRangeReader")
-	defer func() { trace.EndSpan(ctx, err) }()
+	ctx, _ = startSpan(ctx, "httpStorageClient.NewRangeReader")
+	defer func() { endSpan(ctx, err) }()
 
 	s := callSettings(c.settings, opts...)
 
@@ -879,6 +879,7 @@ func (c *httpStorageClient) NewRangeReader(ctx context.Context, params *newRange
 }
 
 func (c *httpStorageClient) newRangeReaderXML(ctx context.Context, params *newRangeReaderParams, s *settings) (r *Reader, err error) {
+	requestID := uuid.New()
 	u := &url.URL{
 		Scheme:  c.scheme,
 		Host:    c.xmlHost,
@@ -936,12 +937,13 @@ func (c *httpStorageClient) newRangeReaderXML(ctx context.Context, params *newRa
 			timer := time.After(stallTimeout)
 			select {
 			case <-timer:
-				log.Printf("stalled read-req (%p) cancelled after %fs", req, stallTimeout.Seconds())
+				log.Printf("[%s] stalled read-req cancelled after %fs", requestID, stallTimeout.Seconds())
 				cancel()
-				err = context.DeadlineExceeded
+				<-done
 				if res != nil && res.Body != nil {
 					res.Body.Close()
 				}
+				return res, context.DeadlineExceeded
 			case <-done:
 				cancel = nil
 			}
@@ -981,7 +983,52 @@ func (c *httpStorageClient) newRangeReaderJSON(ctx context.Context, params *newR
 	return parseReadResponse(res, params, reopen)
 }
 
-func (c *httpStorageClient) OpenWriter(params *openWriterParams, opts ...storageOption) (*io.PipeWriter, error) {
+// httpInternalWriter writes data for an HTTP upload. For single-shot uploads,
+// it also calculates the CRC32C checksum of the data and validates it against
+// the checksum returned by the server.
+type httpInternalWriter struct {
+	*io.PipeWriter
+	chunkSize          int
+	checksumDisabled   bool
+	fullObjectChecksum uint32
+	// In single-shot mode, the server-provided checksum is received on this
+	// channel for validation after the upload is complete.
+	serverChecksumChan chan uint32
+}
+
+// validateChecksum validates the computed checksum against the server-provided checksum.
+func (hiw *httpInternalWriter) validateChecksumFromServer() error {
+	serverChecksum, ok := <-hiw.serverChecksumChan
+	// Do not check for channel closure as error is already set on the writer
+	// if serverChecksumChan is closed without checksum
+	if ok && hiw.fullObjectChecksum != serverChecksum {
+		return fmt.Errorf("storage: object checksum mismatch: computed %q, server %q; the bucket may contain corrupted object", encodeUint32(hiw.fullObjectChecksum), encodeUint32(serverChecksum))
+	}
+	return nil
+}
+
+func (hiw *httpInternalWriter) Write(data []byte) (n int, err error) {
+	if !hiw.checksumDisabled && hiw.chunkSize == 0 {
+		hiw.fullObjectChecksum = crc32.Update(hiw.fullObjectChecksum, crc32cTable, data)
+	}
+	return hiw.PipeWriter.Write(data)
+}
+
+func (hiw *httpInternalWriter) Close() error {
+	if err := hiw.PipeWriter.Close(); err != nil {
+		return err
+	}
+	if !hiw.checksumDisabled && hiw.chunkSize == 0 {
+		return hiw.validateChecksumFromServer()
+	}
+	return nil
+}
+
+func (hiw *httpInternalWriter) Flush() (int64, error) {
+	return 0, errors.New("Writer.Flush is only supported for gRPC-based clients")
+}
+
+func (c *httpStorageClient) OpenWriter(params *openWriterParams, opts ...storageOption) (internalWriter, error) {
 	if params.append {
 		return nil, errors.New("storage: append not supported on HTTP Client; use gRPC")
 	}
@@ -1006,10 +1053,18 @@ func (c *httpStorageClient) OpenWriter(params *openWriterParams, opts ...storage
 	}
 
 	pr, pw := io.Pipe()
-
+	var (
+		serverChecksumChan = make(chan uint32, 1)
+		checksumDisabled   = params.disableAutoChecksum || params.sendCRC32C
+	)
+	if !checksumDisabled {
+		mediaOpts = append(mediaOpts, googleapi.EnableAutoChecksum())
+	}
 	go func() {
-		defer close(params.donec)
-
+		defer func() {
+			close(params.donec)
+			close(serverChecksumChan)
+		}()
 		rawObj := attrs.toRawObject(params.bucket)
 		if params.sendCRC32C {
 			rawObj.Crc32c = encodeUint32(attrs.CRC32C)
@@ -1071,10 +1126,18 @@ func (c *httpStorageClient) OpenWriter(params *openWriterParams, opts ...storage
 			pr.CloseWithError(err)
 			return
 		}
-		setObj(newObject(resp))
+		newObj := newObject(resp)
+		if !checksumDisabled && params.chunkSize == 0 {
+			serverChecksumChan <- newObj.CRC32C
+		}
+		setObj(newObj)
 	}()
-
-	return pw, nil
+	return &httpInternalWriter{
+		PipeWriter:         pw,
+		chunkSize:          params.chunkSize,
+		serverChecksumChan: serverChecksumChan,
+		checksumDisabled:   checksumDisabled,
+	}, nil
 }
 
 // IAM methods.
@@ -1273,9 +1336,6 @@ func (c *httpStorageClient) DeleteHMACKey(ctx context.Context, project string, a
 // Note: This API does not support pagination. However, entity limits cap the number of notifications on a single bucket,
 // so all results will be returned in the first response. See https://cloud.google.com/storage/quotas#buckets.
 func (c *httpStorageClient) ListNotifications(ctx context.Context, bucket string, opts ...storageOption) (n map[string]*Notification, err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/storage.httpStorageClient.ListNotifications")
-	defer func() { trace.EndSpan(ctx, err) }()
-
 	s := callSettings(c.settings, opts...)
 	call := c.raw.Notifications.List(bucket)
 	if s.userProject != "" {
@@ -1293,9 +1353,6 @@ func (c *httpStorageClient) ListNotifications(ctx context.Context, bucket string
 }
 
 func (c *httpStorageClient) CreateNotification(ctx context.Context, bucket string, n *Notification, opts ...storageOption) (ret *Notification, err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/storage.httpStorageClient.CreateNotification")
-	defer func() { trace.EndSpan(ctx, err) }()
-
 	s := callSettings(c.settings, opts...)
 	call := c.raw.Notifications.Insert(bucket, toRawNotification(n))
 	if s.userProject != "" {
@@ -1313,9 +1370,6 @@ func (c *httpStorageClient) CreateNotification(ctx context.Context, bucket strin
 }
 
 func (c *httpStorageClient) DeleteNotification(ctx context.Context, bucket string, id string, opts ...storageOption) (err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/storage.httpStorageClient.DeleteNotification")
-	defer func() { trace.EndSpan(ctx, err) }()
-
 	s := callSettings(c.settings, opts...)
 	call := c.raw.Notifications.Delete(bucket, id)
 	if s.userProject != "" {
@@ -1420,13 +1474,7 @@ func readerReopen(ctx context.Context, header http.Header, params *newRangeReade
 		err = run(ctx, func(ctx context.Context) error {
 			res, err = doDownload(ctx)
 			if err != nil {
-				var e *googleapi.Error
-				if errors.As(err, &e) {
-					if e.Code == http.StatusNotFound {
-						return ErrObjectNotExist
-					}
-				}
-				return err
+				return formatObjectErr(err)
 			}
 
 			if res.StatusCode == http.StatusNotFound {
@@ -1435,7 +1483,7 @@ func readerReopen(ctx context.Context, header http.Header, params *newRangeReade
 				return ErrObjectNotExist
 			}
 			if res.StatusCode < 200 || res.StatusCode > 299 {
-				body, _ := ioutil.ReadAll(res.Body)
+				body, _ := io.ReadAll(res.Body)
 				res.Body.Close()
 				return &googleapi.Error{
 					Code:   res.StatusCode,
@@ -1459,7 +1507,7 @@ func readerReopen(ctx context.Context, header http.Header, params *newRangeReade
 			//      https://cloud.google.com/storage/docs/transcoding#range,
 			// thus we have to manually move the body forward by seen bytes.
 			if decompressiveTranscoding(res) && seen > 0 {
-				_, _ = io.CopyN(ioutil.Discard, res.Body, seen)
+				_, _ = io.CopyN(io.Discard, res.Body, seen)
 			}
 
 			// If a generation hasn't been specified, and this is the first response we get, let's record the
