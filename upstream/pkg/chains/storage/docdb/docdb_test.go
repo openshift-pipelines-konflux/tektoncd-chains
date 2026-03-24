@@ -14,6 +14,7 @@ limitations under the License.
 package docdb
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ import (
 
 	"github.com/tektoncd/chains/pkg/chains/objects"
 	"github.com/tektoncd/chains/pkg/config"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	v1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	"gocloud.dev/docstore"
 	_ "gocloud.dev/docstore/memdocstore"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,33 @@ import (
 	logtesting "knative.dev/pkg/logging/testing"
 	rtesting "knative.dev/pkg/reconciler/testing"
 )
+
+func TestNewStorageBackend(t *testing.T) {
+	cfg := config.Config{
+		Storage: config.StorageConfigs{
+			DocDB: config.DocDBStorageConfig{
+				// "mem://collection_name/id_field"
+				// Here "collection" is the name of the collection, and "_id" is the primary key field.
+				URL: "mem://collection/_id",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	backend, err := NewStorageBackend(ctx, cfg)
+
+	if err != nil {
+		t.Fatalf("NewStorageBackend() failed: %v", err)
+	}
+
+	if backend == nil {
+		t.Fatal("NewStorageBackend() returned nil backend")
+	}
+
+	if backend.coll == nil {
+		t.Fatal("NewStorageBackend() returned backend with nil collection")
+	}
+}
 
 func TestBackend_StorePayload(t *testing.T) {
 	ctx, _ := rtesting.SetupFakeContext(t)
@@ -46,7 +74,7 @@ func TestBackend_StorePayload(t *testing.T) {
 		{
 			name: "no error",
 			args: args{
-				rawPayload: &v1beta1.TaskRun{ObjectMeta: metav1.ObjectMeta{UID: "foo"}}, //nolint:staticcheck
+				rawPayload: &v1.TaskRun{ObjectMeta: metav1.ObjectMeta{UID: "foo"}},
 				signature:  "signature",
 				key:        "foo",
 			},
@@ -54,7 +82,7 @@ func TestBackend_StorePayload(t *testing.T) {
 		{
 			name: "no error - PipelineRun",
 			args: args{
-				rawPayload: &v1beta1.PipelineRun{ObjectMeta: metav1.ObjectMeta{UID: "foo"}}, //nolint:staticcheck
+				rawPayload: &v1.PipelineRun{ObjectMeta: metav1.ObjectMeta{UID: "foo"}},
 				signature:  "signature",
 				key:        "moo",
 			},
@@ -202,6 +230,22 @@ func TestPopulateMongoServerURL(t *testing.T) {
 			expectedMongoEnv: mongoEnvFromFile,
 			wantErr:          false,
 		},
+		{
+			name: "storage.docdb.mongo-server-url-path has precedence over EVERYTHING",
+			cfg: config.Config{
+				Storage: config.StorageConfigs{
+					DocDB: config.DocDBStorageConfig{
+						URL:                "mongo://chainsdb/chainscollection?id_field=name",
+						MongoServerURLPath: filepath.Join(mongoDir, "MONGO_SERVER_URL"), // Point directly to the file
+						MongoServerURLDir:  mongoDir,                                    // Point to dir (lower priority)
+						MongoServerURL:     "envFromConfig",                             // Point to string (lowest priority)
+					},
+				},
+			},
+			setMongoEnv:      "mongoEnvVar",
+			expectedMongoEnv: mongoEnvFromFile,
+			wantErr:          false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -310,20 +354,20 @@ func TestWatchBackend(t *testing.T) {
 			expectedMongoEnv: testEnv,
 			wantErr:          true,
 		},
-		// TODO: https://github.com/tektoncd/chains/issues/1178
-		// {
-		// 	name: "verify mongo-server-url-dir/MONGO_SERVER_URL is watched",
-		// 	cfg: config.Config{
-		// 		Storage: config.StorageConfigs{
-		// 			DocDB: config.DocDBStorageConfig{
-		// 				URL:               "mongo://chainsdb/chainscollection?id_field=name",
-		// 				MongoServerURLDir: t.TempDir(),
-		// 			},
-		// 		},
-		// 	},
-		// 	expectedMongoEnv: "mongodb://updatedEnv",
-		// 	wantErr:          false,
-		// },
+		// FIXED https://github.com/tektoncd/chains/issues/1178
+		{
+			name: "verify mongo-server-url-dir/MONGO_SERVER_URL is watched",
+			cfg: config.Config{
+				Storage: config.StorageConfigs{
+					DocDB: config.DocDBStorageConfig{
+						URL:               "mongo://chainsdb/chainscollection?id_field=name",
+						MongoServerURLDir: t.TempDir(),
+					},
+				},
+			},
+			expectedMongoEnv: "mongodb://updatedEnv",
+			wantErr:          false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	signing "github.com/tektoncd/chains/pkg/chains"
+	"github.com/tektoncd/chains/pkg/chains/annotations"
 	"github.com/tektoncd/chains/pkg/chains/objects"
 	"github.com/tektoncd/chains/pkg/config"
 	"github.com/tektoncd/chains/pkg/internal/mocksigner"
@@ -37,7 +37,6 @@ import (
 	_ "knative.dev/pkg/client/injection/kube/client/fake"
 	"knative.dev/pkg/configmap"
 	pkgreconciler "knative.dev/pkg/reconciler"
-	reconcilertesting "knative.dev/pkg/reconciler/testing"
 	rtesting "knative.dev/pkg/reconciler/testing"
 	"knative.dev/pkg/system"
 )
@@ -123,7 +122,7 @@ func TestReconciler_handlePipelineRun(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "pipelinerun",
 					Namespace:   "default",
-					Annotations: map[string]string{signing.ChainsAnnotation: "true"},
+					Annotations: map[string]string{annotations.ChainsAnnotation: "true"},
 				},
 				Status: v1.PipelineRunStatus{
 					Status: duckv1.Status{
@@ -307,7 +306,7 @@ func TestReconciler_handlePipelineRun(t *testing.T) {
 				PipelineRunSigner: signer,
 				Pipelineclientset: c,
 				TaskRunLister:     tri.Lister(),
-				Tracker:           &reconcilertesting.FakeTracker{},
+				Tracker:           &rtesting.FakeTracker{},
 			}
 
 			// Create mock taskruns

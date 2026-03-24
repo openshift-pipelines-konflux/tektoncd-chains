@@ -14,6 +14,7 @@ limitations under the License.
 package pubsub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -23,9 +24,9 @@ import (
 	"github.com/tektoncd/chains/pkg/chains/formats"
 	"github.com/tektoncd/chains/pkg/chains/objects"
 	"github.com/tektoncd/chains/pkg/config"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	v1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	"gocloud.dev/pubsub"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	logtesting "knative.dev/pkg/logging/testing"
 	rtesting "knative.dev/pkg/reconciler/testing"
 )
@@ -39,7 +40,7 @@ func TestBackend_StorePayload(t *testing.T) {
 	logger := logtesting.TestLogger(t)
 
 	type fields struct {
-		tr  *v1beta1.TaskRun //nolint:staticcheck
+		tr  *v1.TaskRun
 		cfg config.Config
 	}
 	type args struct {
@@ -56,8 +57,8 @@ func TestBackend_StorePayload(t *testing.T) {
 		{
 			name: "no subject",
 			fields: fields{
-				tr: &v1beta1.TaskRun{ //nolint:staticcheck
-					ObjectMeta: v1.ObjectMeta{
+				tr: &v1.TaskRun{
+					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
 					},
@@ -112,7 +113,7 @@ func TestBackend_StorePayload(t *testing.T) {
 				}
 			}()
 
-			trObj := objects.NewTaskRunObjectV1Beta1(tt.fields.tr)
+			trObj := objects.NewTaskRunObjectV1(tt.fields.tr)
 			// Store the payload.
 			if err := b.StorePayload(ctx, trObj, tt.args.rawPayload, tt.args.signature, tt.args.storageOpts); (err != nil) != tt.wantErr {
 				t.Errorf("Backend.StorePayload() error = %v, wantErr %v", err, tt.wantErr)
@@ -132,5 +133,58 @@ func TestBackend_StorePayload(t *testing.T) {
 			}
 			msg.Ack()
 		})
+	}
+}
+
+func TestNewStorageBackend(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Config{}
+	b, err := NewStorageBackend(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewStorageBackend() error = %v", err)
+	}
+	if b == nil {
+		t.Fatal("NewStorageBackend() returned nil")
+	}
+}
+
+func TestBackend_Type(t *testing.T) {
+	b := &Backend{}
+	if got := b.Type(); got != StorageBackendPubSub {
+		t.Errorf("Backend.Type() = %v, want %v", got, StorageBackendPubSub)
+	}
+}
+
+func TestBackend_NewTopic_Kafka(t *testing.T) {
+	// verifies that we enter the Kafka configuration block
+	// and attempt to open a topic using the kafkapubsub driver.
+	// Since we don't have a real Kafka broker, we expect this might fail,
+	// but we want to ensure it doesn't fail with "invalid provider".
+
+	cfg := config.Config{
+		Storage: config.StorageConfigs{
+			PubSub: config.PubSubStorageConfig{
+				Provider: PubSubProviderKafka,
+				Topic:    "my-topic",
+				Kafka: config.KafkaStorageConfig{
+					BootstrapServers: "localhost:9092",
+				},
+			},
+		},
+	}
+	b := &Backend{cfg: cfg}
+	ctx := context.Background()
+
+	topic, err := b.NewTopic(ctx)
+	if topic != nil {
+		topic.Shutdown(ctx)
+	}
+
+	// If we got an error, ensure it is NOT "invalid provider"
+	// We expect a connection error or similar since there is no Kafka broker
+	if err != nil {
+		if err.Error() == fmt.Sprintf("invalid provider: %q", PubSubProviderKafka) {
+			t.Errorf("NewTopic() handled Kafka provider as invalid")
+		}
 	}
 }

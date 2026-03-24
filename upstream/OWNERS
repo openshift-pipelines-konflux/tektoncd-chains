@@ -1,18 +1,20 @@
 # The OWNERS file is used by prow to automatically merge approved PRs.
 
 approvers:
-- chuangw6
-- chitrangpatel
+- anithapriyanatarajan
+- jkhelil
 - lcarva
-- priyawadhwa
 - PuneetPunamiya
+- vdemeester
 - wlynch
 
 reviewers:
+- anithapriyanatarajan
 - aaron-prindle
-- chitrangpatel
+- jkhelil
 - lcarva
 - PuneetPunamiya
+- vdemeester
 - wlynch
 
 emeritus_approvers:
@@ -21,3 +23,6 @@ emeritus_approvers:
 - lukehinds
 - mattmoor
 - mpeters
+- chuangw6
+- chitrangpatel
+- priyawadhwa

@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/sigstore/rekor/pkg/generated/models"
+	"github.com/tektoncd/chains/pkg/chains/annotations"
 	"github.com/tektoncd/chains/pkg/chains/objects"
 	"github.com/tektoncd/chains/pkg/chains/signing"
 	"github.com/tektoncd/chains/pkg/chains/storage"
@@ -166,8 +167,8 @@ func TestSigner_Sign(t *testing.T) {
 
 			// Check it is marked as signed
 			shouldBeSigned := !tt.wantErr
-			if Reconciled(ctx, ps, updatedObject) != shouldBeSigned {
-				t.Errorf("IsSigned()=%t, wanted %t", Reconciled(ctx, ps, updatedObject), shouldBeSigned)
+			if annotations.Reconciled(ctx, ps, updatedObject) != shouldBeSigned {
+				t.Errorf("IsSigned()=%t, wanted %t", annotations.Reconciled(ctx, ps, updatedObject), shouldBeSigned)
 			}
 			// Check the payloads were stored in all the backends.
 			for _, b := range tt.backends {
@@ -321,7 +322,7 @@ func TestSigner_Transparency(t *testing.T) {
 			}
 
 			// add in the annotation
-			setAnnotation(obj, RekorAnnotation, "true")
+			setAnnotation(obj, "chains.tekton.dev/transparency-upload", "true")
 			if err := os.Sign(ctx, obj); err != nil {
 				t.Errorf("Signer.Sign() error = %v", err)
 			}
@@ -493,6 +494,66 @@ func fakeAllBackends(backends []*mockBackend) map[string]storage.Backend {
 		newBackends[m.backendType] = m
 	}
 	return newBackends
+}
+
+func TestObjectSigner_Sign_OCIDisabled(t *testing.T) {
+	tests := []struct {
+		name                  string
+		config                config.Config
+		expectOCIEnabled      bool
+		expectPipelineEnabled bool
+	}{
+		{
+			name: "OCI signing enabled by default",
+			config: config.Config{
+				Artifacts: config.ArtifactConfigs{
+					OCI: config.Artifact{
+						Format:         "simplesigning",
+						StorageBackend: sets.New[string]("mock"),
+						Signer:         "x509",
+					},
+					PipelineRuns: config.Artifact{
+						Format:         "slsa/v1",
+						StorageBackend: sets.New[string]("mock"),
+						Signer:         "x509",
+					},
+				},
+			},
+			expectOCIEnabled:      true,
+			expectPipelineEnabled: true,
+		},
+		{
+			name: "OCI signing disabled with none signer",
+			config: config.Config{
+				Artifacts: config.ArtifactConfigs{
+					OCI: config.Artifact{
+						Format:         "simplesigning",
+						StorageBackend: sets.New[string]("mock"),
+						Signer:         "none",
+					},
+					PipelineRuns: config.Artifact{
+						Format:         "slsa/v1",
+						StorageBackend: sets.New[string]("mock"),
+						Signer:         "x509",
+					},
+				},
+			},
+			expectOCIEnabled:      false,
+			expectPipelineEnabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test direct artifact configuration - this is the core functionality
+			if tt.config.Artifacts.OCI.Enabled() != tt.expectOCIEnabled {
+				t.Errorf("Config OCI.Enabled() = %v, want %v", tt.config.Artifacts.OCI.Enabled(), tt.expectOCIEnabled)
+			}
+			if tt.config.Artifacts.PipelineRuns.Enabled() != tt.expectPipelineEnabled {
+				t.Errorf("Config PipelineRuns.Enabled() = %v, want %v", tt.config.Artifacts.PipelineRuns.Enabled(), tt.expectPipelineEnabled)
+			}
+		})
+	}
 }
 
 func setupMocks(rekor *mockRekor) func() {
